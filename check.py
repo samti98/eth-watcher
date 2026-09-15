@@ -1,13 +1,6 @@
 """
 ETH wallet watcher -> Telegram notifications.
-Runs once per call (GitHub Actions calls it every 5 minutes).
-Uses only the Python standard library.
-
-Env vars (set as GitHub Secrets):
-  WALLETS             comma-separated addresses, e.g. 0xabc...,0xdef...
-  ETHERSCAN_API_KEY   free key from https://etherscan.io/myapikey
-  TELEGRAM_BOT_TOKEN  from @BotFather
-  TELEGRAM_CHAT_ID    your chat id (see README)
+Each run checks every 20s for ~8 min (GitHub Actions starts a run every 5 min).
 """
 import json
 import os
@@ -33,7 +26,6 @@ def http_get(url, params):
 
 
 def etherscan(action, address, startblock):
-    """Return list of txs (sorted oldest first) for txlist / txlistinternal."""
     for attempt in range(3):
         data = http_get(API, {
             "chainid": 1, "module": "account", "action": action,
@@ -78,13 +70,11 @@ def load_state():
         return {}
 
 
-def main():
-    state = load_state()
+def check_once(state):
     changed = False
 
     for wallet in WALLETS:
         if wallet not in state:
-            # First time: start from now, don't spam old history.
             state[wallet] = latest_block()
             changed = True
             telegram(f"👀 Now watching <code>{wallet}</code>")
@@ -113,15 +103,31 @@ def main():
             state[wallet] = max(int(t["blockNumber"]) for t in txs)
             changed = True
 
-    if changed:
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f, indent=2)
-    print("state changed" if changed else "no new transfers")
+    return changed
+
+
+INTERVAL = int(os.environ.get("INTERVAL", "20"))
+RUN_FOR = int(os.environ.get("RUN_FOR", "480"))
+
+
+def main():
+    state = load_state()
+    end = time.time() + RUN_FOR
+    errors = 0
+    while True:
+        try:
+            if check_once(state):
+                with open(STATE_FILE, "w") as f:
+                    json.dump(state, f, indent=2)
+                print("new activity, state saved")
+        except Exception as e:
+            errors += 1
+            print(f"check failed: {e}", file=sys.stderr)
+        if time.time() + INTERVAL >= end:
+            break
+        time.sleep(INTERVAL)
+    print(f"done, {errors} failed checks")
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(e, file=sys.stderr)
-        sys.exit(1)
+    main()
